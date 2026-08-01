@@ -209,10 +209,18 @@ struct Supertonic3Synthesizer {
         }
 
         let wavSamples = Supertonic3MultiArray.extractFloats(wavArray)
-        let firstDuration = durations.first ?? 0
-        let trimLen = min(wavSamples.count, Int(Float(cfg.ae.sampleRate) * firstDuration))
-        let trimmed = trimLen > 0 ? Array(wavSamples.prefix(trimLen)) : wavSamples
-        return (trimmed, firstDuration)
+        // Deliberately not trimmed to the predicted duration.
+        //
+        // `durations` is the duration predictor's *estimate*, while the latent
+        // is padded up to a whole number of chunks, so the vocoder returns at
+        // most `baseChunkSize * chunkCompressFactor` samples (~70 ms at
+        // 44.1 kHz) more than the estimate. Cutting exactly at the estimate
+        // leaves zero margin: every time the predictor comes in short, the
+        // closing phoneme is clipped off mid-sound. The padded tail is masked
+        // to zero before denoising, so keeping it costs a short stretch of
+        // near-silence rather than a swallowed syllable.
+        let duration = Float(wavSamples.count) / Float(cfg.ae.sampleRate)
+        return (wavSamples, duration)
     }
 
     // MARK: - CoreML plumbing
