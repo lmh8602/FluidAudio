@@ -13,10 +13,19 @@ public enum Supertonic3ResourceDownloader {
 
     /// Ensure all required Supertonic-3 model + companion files are present
     /// locally. Returns the resolved repo directory.
+    /// - Parameter mirror: Plain HTTPS directory to prefer over HuggingFace,
+    ///   laid out as described by `Supertonic3Mirror`. Use it to ship an asset
+    ///   set that is not on HF — a build pinned to a different text window `T`,
+    ///   for instance. **A mirror failure falls back to HuggingFace** rather
+    ///   than throwing: one unreachable host must not cost the app its voice.
+    ///   The fallback set may pin a different `T`, which is safe only because
+    ///   callers read the window off the loaded model
+    ///   (`Supertonic3ModelStore.textTokenLength`) instead of assuming one.
     @discardableResult
     public static func ensureModels(
         directory: URL? = nil,
         veVariant: String? = nil,
+        mirror: URL? = nil,
         progressHandler: ProgressHandler? = nil
     ) async throws -> URL {
         let modelsRoot = try directory ?? defaultCacheRoot()
@@ -28,13 +37,26 @@ public enum Supertonic3ResourceDownloader {
         }
 
         if !allPresent {
-            logger.info("Downloading Supertonic-3 CoreML assets from HuggingFace…")
-            do {
-                try await ModelHub.download(
-                    .supertonic3, to: modelsRoot, variant: veVariant,
-                    progressHandler: progressHandler)
-            } catch {
-                throw Supertonic3Error.downloadFailed("\(error)")
+            var downloaded = false
+            if let mirror {
+                do {
+                    try await Supertonic3Mirror.download(
+                        from: mirror, to: repoDir, progressHandler: progressHandler)
+                    downloaded = true
+                } catch {
+                    logger.warning(
+                        "Mirror download failed (\(error)); falling back to HuggingFace")
+                }
+            }
+            if !downloaded {
+                logger.info("Downloading Supertonic-3 CoreML assets from HuggingFace…")
+                do {
+                    try await ModelHub.download(
+                        .supertonic3, to: modelsRoot, variant: veVariant,
+                        progressHandler: progressHandler)
+                } catch {
+                    throw Supertonic3Error.downloadFailed("\(error)")
+                }
             }
         } else {
             logger.info("Supertonic-3 assets found in cache at \(repoDir.path)")
