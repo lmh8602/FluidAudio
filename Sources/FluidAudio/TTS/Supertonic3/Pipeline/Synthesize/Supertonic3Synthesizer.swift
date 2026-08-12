@@ -37,12 +37,14 @@ struct Supertonic3Synthesizer {
         style: Supertonic3VoiceStyle,
         totalSteps: Int,
         speed: Float,
-        silenceDuration: Float
+        silenceDuration: Float,
+        maxChunkLength: Int? = nil
     ) async throws -> (samples: [Float], duration: Float) {
         let maxLen =
-            Supertonic3Constants.cjkLanguages.contains(language)
-            ? Supertonic3Constants.maxChunkLengthCJK
-            : Supertonic3Constants.maxChunkLengthLatin
+            maxChunkLength
+            ?? (Supertonic3Constants.cjkLanguages.contains(language)
+                ? Supertonic3Constants.maxChunkLengthCJK
+                : Supertonic3Constants.maxChunkLengthLatin)
 
         let chunks = Supertonic3TextChunker.chunk(text: text, maxLen: maxLen)
         guard !chunks.isEmpty else { throw Supertonic3Error.emptyText }
@@ -79,7 +81,8 @@ struct Supertonic3Synthesizer {
         totalSteps: Int, speed: Float
     ) async throws -> (samples: [Float], duration: Float) {
         let (idsBatch, maskBatch) = try processor.encode(
-            texts: [text], languages: [language])
+            texts: [text], languages: [language],
+            windowLength: await store.textTokenLength)
         guard let ids = idsBatch.first, let mask = maskBatch.first else {
             throw Supertonic3Error.emptyText
         }

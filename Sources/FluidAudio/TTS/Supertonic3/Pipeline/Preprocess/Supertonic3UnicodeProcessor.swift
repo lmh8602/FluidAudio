@@ -20,6 +20,8 @@ import Foundation
 /// the lookup is an O(1) index into a Swift array.
 struct Supertonic3UnicodeProcessor {
 
+    private let logger = AppLogger(category: "Supertonic3UnicodeProcessor")
+
     let indexer: [Int64]
 
     init(unicodeIndexerURL: URL) throws {
@@ -33,8 +35,14 @@ struct Supertonic3UnicodeProcessor {
 
     /// Encode a batch of (text, language) pairs into padded Int64 IDs +
     /// per-row float masks (`[bsz, 1, maxLen]`).
+    ///
+    /// - Parameter windowLength: The pinned T axis of the loaded
+    ///   `text_encoder` / `duration_predictor` bundles. Callers pass the value
+    ///   read off the model description so a re-converted model (T=320, …)
+    ///   works without recompiling; the constant is only a fallback.
     func encode(
-        texts: [String], languages: [String]
+        texts: [String], languages: [String],
+        windowLength: Int = Supertonic3Constants.textTFixed
     ) throws -> (ids: [[Int64]], mask: [[[Float]]]) {
         precondition(texts.count == languages.count, "texts/languages length mismatch")
 
@@ -52,10 +60,25 @@ struct Supertonic3UnicodeProcessor {
         }
 
         // The text_encoder + duration_predictor models pin the T axis at
-        // `textTFixed` (128). Truncate longer inputs and zero-pad shorter
-        // ones so the bound MLMultiArray shape always matches the spec.
-        let maxLen = Supertonic3Constants.textTFixed
+        // `windowLength`. Truncate longer inputs and zero-pad shorter ones so
+        // the bound MLMultiArray shape always matches the spec.
+        //
+        // T counts NFKD-decomposed unicode *scalars*, not visible characters.
+        // Hangul syllables decompose into 2-3 jamo each, so Korean spends
+        // ~2.0-2.2 scalars per character and overruns the window far earlier
+        // than a character-count cap suggests. Overruns used to be dropped in
+        // silence here; they are now reported so callers can size their
+        // chunker against the real budget.
+        let maxLen = windowLength
         let lengths = processed.map { min($0.unicodeScalars.count, maxLen) }
+        for (text, original) in zip(processed, texts) where text.unicodeScalars.count > maxLen {
+            let overflow = text.unicodeScalars.count - maxLen
+            logger.warning(
+                """
+                Text window overrun: \(text.unicodeScalars.count) scalars > T=\(maxLen); \
+                dropping the trailing \(overflow) scalar(s). Source: "\(original.prefix(40))…"
+                """)
+        }
 
         var ids: [[Int64]] = []
         ids.reserveCapacity(processed.count)

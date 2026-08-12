@@ -115,7 +115,8 @@ public actor Supertonic3Manager {
         style: Supertonic3VoiceStyle,
         totalSteps: Int = Supertonic3Constants.defaultTotalSteps,
         speed: Float = Supertonic3Constants.defaultSpeed,
-        silenceDuration: Float = Supertonic3Constants.defaultSilenceDuration
+        silenceDuration: Float = Supertonic3Constants.defaultSilenceDuration,
+        maxChunkLength: Int? = nil
     ) async throws -> (samples: [Float], duration: Float) {
         guard let synthesizer = synthesizer else {
             throw Supertonic3Error.notInitialized
@@ -123,7 +124,14 @@ public actor Supertonic3Manager {
         return try await synthesizer.synthesize(
             text: text, language: language, style: style,
             totalSteps: totalSteps, speed: speed,
-            silenceDuration: silenceDuration)
+            silenceDuration: silenceDuration,
+            maxChunkLength: maxChunkLength)
+    }
+
+    /// The `T` axis pinned by the loaded `text_encoder`, or the compile-time
+    /// default before `initialize()` runs.
+    public var textTokenLength: Int {
+        get async { await store?.textTokenLength ?? Supertonic3Constants.textTFixed }
     }
 
     public func cleanup() async {

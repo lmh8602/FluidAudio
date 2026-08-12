@@ -36,6 +36,16 @@ public actor Supertonic3ModelStore {
 
     private(set) var config: Supertonic3Config = .defaults
 
+    /// The `T` axis the loaded `text_encoder` actually pins, read off its
+    /// model description in `loadIfNeeded()`.
+    ///
+    /// `Supertonic3Constants.textTFixed` is only the value the published
+    /// conversion happens to use; the ONNX graph leaves `text_length` dynamic,
+    /// so a re-converted bundle can pin any `T`. Reading it from the model
+    /// keeps the preprocessor and the chunk caps honest for whichever bundle
+    /// is on disk instead of assuming 128.
+    public private(set) var textTokenLength: Int = Supertonic3Constants.textTFixed
+
     public init(
         directory: URL? = nil,
         computeUnits: MLComputeUnits = .cpuAndNeuralEngine,
@@ -97,6 +107,13 @@ public actor Supertonic3ModelStore {
         durationPredictorModel = try loadModel(
             repoDir: repoDir,
             fileName: ModelNames.Supertonic3.durationPredictorFile, config: cfg)
+
+        textTokenLength = Self.pinnedTextWindow(of: textEncoderModel) ?? Supertonic3Constants.textTFixed
+        if textTokenLength != Supertonic3Constants.textTFixed {
+            logger.info(
+                "text_encoder pins T=\(textTokenLength) (compile-time default is "
+                    + "\(Supertonic3Constants.textTFixed))")
+        }
         vocoderModel = try loadModel(
             repoDir: repoDir,
             fileName: ModelNames.Supertonic3.vocoderFile, config: cfg)
@@ -119,6 +136,21 @@ public actor Supertonic3ModelStore {
     }
 
     // MARK: - Accessors
+
+    /// Read the pinned `T` off a loaded bundle's `text_ids` input.
+    ///
+    /// Returns `nil` when the input is missing or its trailing axis is not a
+    /// fixed positive length (a flexible-shape conversion), leaving the caller
+    /// on the compile-time default.
+    private static func pinnedTextWindow(of model: MLModel?) -> Int? {
+        guard
+            let constraint = model?.modelDescription
+                .inputDescriptionsByName["text_ids"]?.multiArrayConstraint,
+            let trailing = constraint.shape.last?.intValue,
+            trailing > 0
+        else { return nil }
+        return trailing
+    }
 
     public func textEncoder() throws -> MLModel { try unwrap(textEncoderModel, name: "text_encoder") }
     public func durationPredictor() throws -> MLModel {
