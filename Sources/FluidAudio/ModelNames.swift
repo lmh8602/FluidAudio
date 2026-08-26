@@ -1087,7 +1087,19 @@ public enum ModelNames {
 
         /// Fixed latent buckets published for ANE residency (smallest ≥ chunk
         /// length is selected at synthesis time).
-        public static let aneBuckets: [Int] = [128, 256, 512]
+        ///
+        /// **Downstream patch (Readmon): `L512` is not published.** Measured on
+        /// 856k chunks produced by the app's chunker over a 200-book Korean
+        /// web-novel corpus, only 6 chunks (0.0007%) would need a latent longer
+        /// than 256 at synthesis speed 1.0 — 7 at the slowest speed the app
+        /// offers. Shipping that bucket costs a 63 MB download and a ~10 s
+        /// first-load stall for a case the app now prevents outright: its
+        /// chunker caps chunk length so the estimated audio stays inside the
+        /// `L256` ceiling (~17.7 s), so a request above 256 cannot be produced.
+        ///
+        /// Re-add `512` here if that cap is ever removed — otherwise
+        /// `vectorEstimator(forLatentLength:)` throws and playback stops.
+        public static let aneBuckets: [Int] = [128, 256]
 
         /// Quantized / fixed-length VectorEstimator builds live under this repo
         /// subdirectory; the FP16 dynamic model + the 3 shared modules sit at
