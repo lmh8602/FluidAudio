@@ -29,10 +29,16 @@ public enum Supertonic3ResourceDownloader {
     ///   mirrors again** — otherwise a device that installed during an outage
     ///   would keep the fallback set for good. The replacement is **staged**,
     ///   not swapped in: the running process may already have loaded the old
-    ///   set, and the two may pin different `T`. The next call promotes the
-    ///   staged set before anything loads, so call this once at launch. A
-    ///   mirror set, or a set with no marker (placed by hand), is never
-    ///   re-downloaded.
+    ///   set, and the two may pin different `T`. Promotion is the host's job
+    ///   (`Supertonic3Mirror.promoteStagedSet`, once at launch before any model
+    ///   loads); this function never promotes, and once a completed staging
+    ///   exists it does not download again. A mirror set, or a set with no
+    ///   marker (placed by hand), is never re-downloaded.
+    ///
+    ///   Calls for the same directory are serialized: a second caller joins the
+    ///   in-flight one and gets its result (its own `progressHandler` stays
+    ///   silent). Two downloads into the same staging would delete each other's
+    ///   files.
     @discardableResult
     public static func ensureModels(
         directory: URL? = nil,
@@ -42,11 +48,23 @@ public enum Supertonic3ResourceDownloader {
     ) async throws -> URL {
         let modelsRoot = try directory ?? defaultCacheRoot()
         let repoDir = try assetDirectory(under: modelsRoot)
+        return try await serializer.run(key: repoDir.path) {
+            try await ensureModelsUnserialized(
+                modelsRoot: modelsRoot, repoDir: repoDir, veVariant: veVariant,
+                mirrors: mirrors, progressHandler: progressHandler)
+        }
+    }
 
-        // A staged upgrade from an earlier call goes in first, before the
-        // existence check and before anything can load from `repoDir`.
-        try Supertonic3Mirror.promoteStagedSet(for: repoDir)
+    /// One in-flight `ensureModels` per asset directory; later callers await it.
+    private static let serializer = KeyedTaskSerializer<URL>()
 
+    private static func ensureModelsUnserialized(
+        modelsRoot: URL,
+        repoDir: URL,
+        veVariant: String?,
+        mirrors: [URL],
+        progressHandler: ProgressHandler?
+    ) async throws -> URL {
         let required = ModelNames.Supertonic3.requiredFiles(veVariant: veVariant)
         let allPresent = required.allSatisfy { file in
             FileManager.default.fileExists(atPath: repoDir.appendingPathComponent(file).path)
@@ -56,6 +74,10 @@ public enum Supertonic3ResourceDownloader {
 
         if allPresent && !wantsUpgrade {
             logger.info("Supertonic-3 assets found in cache at \(repoDir.path)")
+            return repoDir
+        }
+        if wantsUpgrade && Supertonic3Mirror.hasCompletedStaging(for: repoDir) {
+            logger.info("Upgrade already staged; waiting for the host to promote it")
             return repoDir
         }
 
@@ -177,5 +199,25 @@ public enum Supertonic3ResourceDownloader {
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         }
         return root
+    }
+}
+
+/// Coalesces concurrent async operations by key: the first caller runs the
+/// operation, later callers for the same key await the same task and receive
+/// its result (or error). Once it finishes the key is free again.
+actor KeyedTaskSerializer<Value: Sendable> {
+    private var inflight: [String: Task<Value, Error>] = [:]
+
+    func run(
+        key: String,
+        _ operation: @escaping @Sendable () async throws -> Value
+    ) async throws -> Value {
+        if let running = inflight[key] {
+            return try await running.value
+        }
+        let task = Task { try await operation() }
+        inflight[key] = task
+        defer { inflight[key] = nil }
+        return try await task.value
     }
 }

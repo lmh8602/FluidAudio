@@ -93,9 +93,10 @@ final class Supertonic3MirrorTests: XCTestCase {
     }
 
     /// A set marked as the HuggingFace fallback is **staged** once a mirror
-    /// answers — the running process may have loaded the old set — and
-    /// promoted by the next call, before that call checks what is installed.
-    func testEnsureModelsStagesAFallbackUpgradeAndPromotesItNextTime() async throws {
+    /// answers — the running process may have loaded the old set. `ensureModels`
+    /// never promotes it (it cannot know what is loaded); the host does, once,
+    /// at launch. Until then further calls neither promote nor download again.
+    func testEnsureModelsStagesAFallbackUpgradeAndLeavesPromotionToTheHost() async throws {
         let repoDir = try makeInstalledSet(source: .huggingFace)
         let live = try makeRequiredSetMirror(named: "live")
 
@@ -104,18 +105,66 @@ final class Supertonic3MirrorTests: XCTestCase {
         XCTAssertEqual(
             Supertonic3Mirror.installedSource(in: repoDir), .huggingFace,
             "the old set was replaced while it may still be loaded")
+        XCTAssertTrue(Supertonic3Mirror.hasCompletedStaging(for: repoDir), "nothing staged")
+
+        // A later call in the same process (say, the user re-runs the install
+        // flow while models are loaded) must not promote — and must not
+        // download a second time either.
         let staging = Supertonic3Mirror.stagingDirectory(for: repoDir)
-        XCTAssertTrue(
-            FileManager.default.fileExists(
-                atPath: staging.appendingPathComponent(Supertonic3Mirror.stagedCompleteMarkerName).path),
-            "no completed staging to promote next time")
+        let stamp = try modificationDate(of: staging.appendingPathComponent(Supertonic3Mirror.stagedCompleteMarkerName))
+        let other = try makeRequiredSetMirror(named: "other")
+        _ = try await Supertonic3ResourceDownloader.ensureModels(directory: root, mirrors: [other])
+        XCTAssertEqual(Supertonic3Mirror.installedSource(in: repoDir), .huggingFace, "promoted mid-session")
+        XCTAssertEqual(
+            try modificationDate(of: staging.appendingPathComponent(Supertonic3Mirror.stagedCompleteMarkerName)),
+            stamp, "re-downloaded over a completed staging")
 
-        // Next launch: even with every mirror dead, the staged set goes in.
-        let dead = root.appendingPathComponent("nowhere", isDirectory: true)
-        _ = try await Supertonic3ResourceDownloader.ensureModels(directory: root, mirrors: [dead])
-
+        // Next launch: the host promotes before anything loads.
+        XCTAssertTrue(try Supertonic3Mirror.promoteStagedSet(for: repoDir))
         XCTAssertEqual(Supertonic3Mirror.installedSource(in: repoDir), .mirror(live))
         XCTAssertFalse(FileManager.default.fileExists(atPath: staging.path), "staging left behind")
+        XCTAssertFalse(
+            FileManager.default.fileExists(
+                atPath: repoDir.appendingPathComponent(Supertonic3Mirror.stagedCompleteMarkerName).path),
+            "completion marker travelled into the live set")
+    }
+
+    /// Promotion never leaves the destination empty: if the move fails the old
+    /// set is restored and the staging kept for the next attempt.
+    func testPromoteRestoresTheOldSetWhenTheMoveFails() throws {
+        let repoDir = try makeInstalledSet(source: .huggingFace)
+        let staging = Supertonic3Mirror.stagingDirectory(for: repoDir)
+        try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
+        try "new".write(to: staging.appendingPathComponent("tts.json"), atomically: true, encoding: .utf8)
+        try "".write(
+            to: staging.appendingPathComponent(Supertonic3Mirror.stagedCompleteMarkerName),
+            atomically: true, encoding: .utf8)
+        // Make the parent unwritable so the move into place fails.
+        let parent = repoDir.deletingLastPathComponent()
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: parent.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: parent.path) }
+
+        XCTAssertThrowsError(try Supertonic3Mirror.promoteStagedSet(for: repoDir))
+
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: parent.path)
+        XCTAssertEqual(Supertonic3Mirror.installedSource(in: repoDir), .huggingFace, "old set lost")
+        XCTAssertEqual(
+            try String(contentsOf: repoDir.appendingPathComponent("tts.json"), encoding: .utf8), "installed")
+        XCTAssertTrue(Supertonic3Mirror.hasCompletedStaging(for: repoDir), "staging discarded")
+    }
+
+    /// Two concurrent calls for the same directory share one download.
+    func testConcurrentEnsureModelsCallsJoinTheSameDownload() async throws {
+        let live = try makeRequiredSetMirror(named: "live")
+        let root = self.root!
+
+        async let first = Supertonic3ResourceDownloader.ensureModels(directory: root, mirrors: [live])
+        async let second = Supertonic3ResourceDownloader.ensureModels(directory: root, mirrors: [live])
+        let (a, b) = try await (first, second)
+
+        XCTAssertEqual(a, b)
+        XCTAssertEqual(Supertonic3Mirror.installedSource(in: a), .mirror(live))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: Supertonic3Mirror.stagingDirectory(for: a).path))
     }
 
     /// An interrupted staging (no completion marker) is never promoted.

@@ -74,20 +74,47 @@ public enum Supertonic3Mirror {
     /// swap was deliberately deferred (`download(deferSwap:)`).
     public static let stagedCompleteMarkerName = ".complete"
 
+    /// Is there a finished, not-yet-promoted set waiting next to `destination`?
+    public static func hasCompletedStaging(for destination: URL) -> Bool {
+        FileManager.default.fileExists(
+            atPath: stagingDirectory(for: destination)
+                .appendingPathComponent(stagedCompleteMarkerName).path)
+    }
+
     /// Move a fully staged set into place. Returns `false` when nothing is
-    /// staged. **Call before any model is loaded** — that is the whole reason
-    /// a swap gets deferred: replacing files under a loaded set would let a
-    /// text encoder pinned to one `T` meet estimator buckets pinned to another.
+    /// staged. **This is the host's call to make, once, before any model is
+    /// loaded** — `ensureModels` never promotes on its own, because it cannot
+    /// know whether the process already holds the old set in memory, and a
+    /// text encoder pinned to one `T` must not meet estimator buckets pinned
+    /// to another.
+    ///
+    /// Order matters for the failure cases: the old set is parked, the new one
+    /// moved in, and only then is the park removed and the completion marker
+    /// dropped. A failed move restores the old set and leaves the staging
+    /// (still marked complete) for the next attempt. Nothing ever leaves the
+    /// destination empty.
     @discardableResult
     public static func promoteStagedSet(for destination: URL) throws -> Bool {
+        let fm = FileManager.default
         let staging = stagingDirectory(for: destination)
         let complete = staging.appendingPathComponent(stagedCompleteMarkerName)
-        guard FileManager.default.fileExists(atPath: complete.path) else { return false }
-        try FileManager.default.removeItem(at: complete)
-        try? FileManager.default.removeItem(at: destination)
-        try FileManager.default.createDirectory(
+        guard fm.fileExists(atPath: complete.path) else { return false }
+
+        let parked = destination.deletingLastPathComponent()
+            .appendingPathComponent(".\(destination.lastPathComponent).replaced", isDirectory: true)
+        try? fm.removeItem(at: parked)
+        try fm.createDirectory(
             at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try FileManager.default.moveItem(at: staging, to: destination)
+        let hadOld = fm.fileExists(atPath: destination.path)
+        if hadOld { try fm.moveItem(at: destination, to: parked) }
+        do {
+            try fm.moveItem(at: staging, to: destination)
+        } catch {
+            if hadOld { try? fm.moveItem(at: parked, to: destination) }
+            throw error
+        }
+        try? fm.removeItem(at: destination.appendingPathComponent(stagedCompleteMarkerName))
+        try? fm.removeItem(at: parked)
         logger.info("Promoted staged mirror set into \(destination.path)")
         return true
     }
