@@ -65,14 +65,14 @@ public enum Supertonic3Mirror {
     }
 
     /// Sibling directory a set is downloaded into before it is moved into place.
-    static func stagingDirectory(for destination: URL) -> URL {
+    public static func stagingDirectory(for destination: URL) -> URL {
         destination.deletingLastPathComponent()
             .appendingPathComponent(".\(destination.lastPathComponent).partial", isDirectory: true)
     }
 
     /// Present inside the staging directory once every file has landed and the
     /// swap was deliberately deferred (`download(deferSwap:)`).
-    static let stagedCompleteMarkerName = ".complete"
+    public static let stagedCompleteMarkerName = ".complete"
 
     /// Move a fully staged set into place. Returns `false` when nothing is
     /// staged. **Call before any model is loaded** — that is the whole reason
@@ -166,7 +166,7 @@ public enum Supertonic3Mirror {
     /// Absolute paths and `..` segments are rejected — the manifest decides
     /// where bytes land on disk, so a hostile or broken one must not be able to
     /// name a path outside the destination.
-    static func fetchManifest(from baseURL: URL) async throws -> [String] {
+    public static func fetchManifest(from baseURL: URL) async throws -> [String] {
         let url = baseURL.appendingPathComponent(manifestName)
         let (data, response) = try await URLSession.shared.data(from: url)
         if let http = response as? HTTPURLResponse, http.statusCode != 200 {
