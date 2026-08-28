@@ -13,56 +13,108 @@ public enum Supertonic3ResourceDownloader {
 
     /// Ensure all required Supertonic-3 model + companion files are present
     /// locally. Returns the resolved repo directory.
-    /// - Parameter mirror: Plain HTTPS directory to prefer over HuggingFace,
-    ///   laid out as described by `Supertonic3Mirror`. Use it to ship an asset
-    ///   set that is not on HF — a build pinned to a different text window `T`,
-    ///   for instance. **A mirror failure falls back to HuggingFace** rather
-    ///   than throwing: one unreachable host must not cost the app its voice.
-    ///   The fallback set may pin a different `T`, which is safe only because
-    ///   callers read the window off the loaded model
+    /// - Parameter mirrors: Plain HTTPS directories to try **in order** before
+    ///   HuggingFace, each laid out as described by `Supertonic3Mirror`. Use
+    ///   them to ship an asset set that is not on HF — a build pinned to a
+    ///   different text window `T`, for instance — and to give that set more
+    ///   than one home. **Every mirror failing falls back to HuggingFace**
+    ///   rather than throwing: unreachable hosts must not cost the app its
+    ///   voice. The fallback set may pin a different `T`, which is safe only
+    ///   because callers read the window off the loaded model
     ///   (`Supertonic3ModelStore.textTokenLength`) instead of assuming one.
+    ///
+    ///   A set that arrived through that fallback is marked as such
+    ///   (`Supertonic3Mirror.installedSource`). When mirrors are given and the
+    ///   installed set carries the fallback marker, this call **tries the
+    ///   mirrors again** — otherwise a device that installed during an outage
+    ///   would keep the fallback set for good. The replacement is **staged**,
+    ///   not swapped in: the running process may already have loaded the old
+    ///   set, and the two may pin different `T`. The next call promotes the
+    ///   staged set before anything loads, so call this once at launch. A
+    ///   mirror set, or a set with no marker (placed by hand), is never
+    ///   re-downloaded.
     @discardableResult
     public static func ensureModels(
         directory: URL? = nil,
         veVariant: String? = nil,
-        mirror: URL? = nil,
+        mirrors: [URL] = [],
         progressHandler: ProgressHandler? = nil
     ) async throws -> URL {
         let modelsRoot = try directory ?? defaultCacheRoot()
-        let repoDir = modelsRoot.appendingPathComponent(Repo.supertonic3.folderName)
+        let repoDir = try assetDirectory(under: modelsRoot)
+
+        // A staged upgrade from an earlier call goes in first, before the
+        // existence check and before anything can load from `repoDir`.
+        try Supertonic3Mirror.promoteStagedSet(for: repoDir)
 
         let required = ModelNames.Supertonic3.requiredFiles(veVariant: veVariant)
         let allPresent = required.allSatisfy { file in
             FileManager.default.fileExists(atPath: repoDir.appendingPathComponent(file).path)
         }
+        let wantsUpgrade = allPresent && !mirrors.isEmpty
+            && Supertonic3Mirror.installedSource(in: repoDir) == .huggingFace
 
-        if !allPresent {
-            var downloaded = false
-            if let mirror {
-                do {
-                    try await Supertonic3Mirror.download(
-                        from: mirror, to: repoDir, progressHandler: progressHandler)
-                    downloaded = true
-                } catch {
-                    logger.warning(
-                        "Mirror download failed (\(error)); falling back to HuggingFace")
-                }
-            }
-            if !downloaded {
-                logger.info("Downloading Supertonic-3 CoreML assets from HuggingFace…")
-                do {
-                    try await ModelHub.download(
-                        .supertonic3, to: modelsRoot, variant: veVariant,
-                        progressHandler: progressHandler)
-                } catch {
-                    throw Supertonic3Error.downloadFailed("\(error)")
-                }
-            }
-        } else {
+        if allPresent && !wantsUpgrade {
             logger.info("Supertonic-3 assets found in cache at \(repoDir.path)")
+            return repoDir
         }
 
+        for mirror in mirrors {
+            do {
+                try await Supertonic3Mirror.download(
+                    from: mirror, to: repoDir, deferSwap: wantsUpgrade,
+                    progressHandler: progressHandler)
+                return repoDir
+            } catch {
+                logger.warning("Mirror \(mirror.absoluteString) failed (\(error)); trying next")
+            }
+        }
+
+        if wantsUpgrade {
+            // Nothing answered; the fallback set still works. Try again next time.
+            logger.warning("No mirror reachable; keeping the HuggingFace fallback set")
+            return repoDir
+        }
+
+        logger.info("Downloading Supertonic-3 CoreML assets from HuggingFace…")
+        do {
+            try await ModelHub.download(
+                .supertonic3, to: modelsRoot, variant: veVariant,
+                progressHandler: progressHandler)
+        } catch {
+            throw Supertonic3Error.downloadFailed("\(error)")
+        }
+        // Only mark when a mirror was actually offered — a caller that never
+        // configured one has nothing to upgrade to, and the marker would only
+        // trigger retries against an empty list.
+        if !mirrors.isEmpty {
+            try? Supertonic3Mirror.writeSourceMarker(.huggingFace, in: repoDir)
+        }
         return repoDir
+    }
+
+    /// Where `ensureModels` keeps the set under `directory` (the cache root
+    /// when nil). Callers that need to inspect the installed set — its
+    /// `Supertonic3Mirror.installedSource`, say — should ask here rather than
+    /// rebuild the path.
+    public static func assetDirectory(under directory: URL? = nil) throws -> URL {
+        let modelsRoot = try directory ?? defaultCacheRoot()
+        return modelsRoot.appendingPathComponent(Repo.supertonic3.folderName)
+    }
+
+    /// Single-mirror convenience. `mirror` is required here (no default) so a
+    /// call without it resolves to the `mirrors:` overload unambiguously.
+    @discardableResult
+    public static func ensureModels(
+        directory: URL? = nil,
+        veVariant: String? = nil,
+        mirror: URL?,
+        progressHandler: ProgressHandler? = nil
+    ) async throws -> URL {
+        try await ensureModels(
+            directory: directory, veVariant: veVariant,
+            mirrors: mirror.map { [$0] } ?? [],
+            progressHandler: progressHandler)
     }
 
     /// Ensure a built-in voice style JSON is present locally, downloading it
